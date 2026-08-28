@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>Dam App - CI/CD Pipeline</title>
+  <style>
+    body { font-family: "Microsoft YaHei", sans-serif; background: #0f172a; color: #e2e8f0;
+           display: flex; height: 100vh; margin: 0; align-items: center; justify-content: center; }
+    .card { text-align: center; padding: 48px; border-radius: 16px; background: #1e293b;
+            box-shadow: 0 20px 60px rgba(0,0,0,.5); }
+    h1 { font-size: 42px; margin: 0 0 12px; }
+    .build { color: #38bdf8; font-size: 22px; font-weight: bold; }
+    .meta { color: #94a3b8; font-size: 14px; margin-top: 24px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>🚀 CI/CD Demo App</h1>
+    <p class="build">Build #__BUILD_NUMBER__</p>
+    <p>代码提交 → 自动构建 → 自动部署，全链路已验证 ✅</p>
+    <p class="meta">部署时间：__BUILD_TIME__</p>
+  </div>
+</body>
+</html>
