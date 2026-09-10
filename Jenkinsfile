@@ -10,8 +10,8 @@
 //                且 --atomic 失败自动回滚（坏版本进不了"已发布"状态）
 //
 // 未变化：Stage 1-3（Checkout / Render / Kaniko Build）原样保留。
-// 前置：Jenkins PodTemplate 的容器镜像换为 11.0.1.128:30000/helm-kubectl:v3.16.4
-//       （中转自 dtzar/helm-kubectl，见项目 E 文档阶段 2）。
+// 前置：Jenkins PodTemplate 的容器镜像换为 11.0.1.128:30000/helm-kubectl:3.19.1
+//       （中转自 dtzar/helm-kubectl:3.19.1，Docker tag 无 v 前缀，见项目 E 文档阶段 2）。
 // ============================================================
 
 def REGISTRY = "11.0.1.128:30000"
