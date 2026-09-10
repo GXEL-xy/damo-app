@@ -1,0 +1,59 @@
+{{- /* ============================================================
+项目 E · damo-app Helm Chart —— Deployment 模板
+
+对比项目 B 裸部署版的三个本质变化（面试核心叙事）：
+① image 不再是 __IMAGE__ 占位符靠 sed 替换，
+   而是 {{ .Values.image.repository }}:{{ .Values.image.tag }}——
+   渲染时求值，helm upgrade --set image.tag=N 即发布；
+② 标签/选择器收敛到 _helpers.tpl，Deployment 与 Service 永不失配；
+③ 所有数值来自 values.yaml，改副本数/配额/探针 = 改一行参数 + 一条命令。
+
+部署顺序：kubectl apply -f chart/  ❌ 不存在的事——Chart 由 helm 安装：
+  helm upgrade --install damo-app . -n damo-app --create-namespace --set image.tag=N
+============================================================ */ -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "damo-app.fullname" . }}          # = damo-app（Release 名同名分支）
+  namespace: {{ .Release.Namespace }}                # 跟随 --namespace，模板零硬编码
+  labels:
+    {{- include "damo-app.labels" . | nindent 4 }}   # nindent 4：整体缩进 4 格对齐 labels:
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}               # HPA 关闭时才写死副本数（项目 G 打开开关即接管）
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "damo-app.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "damo-app.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: {{ .Chart.Name }}                    # 容器名用 Chart 名，足够稳定
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http                             # ★ 端口命名：探针引用 name 而非数字，
+              containerPort: 80                      #   以后改端口只改这一处
+          {{- with .Values.probes.startup }}
+          startupProbe:                              # 启动保护：期内存活探针暂停（防慢启动误杀）
+            tcpSocket:
+              port: http
+            initialDelaySeconds: {{ .initialDelaySeconds }}
+            periodSeconds: {{ .periodSeconds }}
+            failureThreshold: {{ .failureThreshold }}
+          {{- end }}
+          readinessProbe:                            # 就绪：不接流量（滚动更新 0 中断的关键）
+            tcpSocket:
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+          livenessProbe:                             # 存活：失败才重启
+            tcpSocket:
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}   {{/* toYaml：整块 map 直接转 YAML */}}

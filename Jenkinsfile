@@ -1,14 +1,30 @@
-def REGISTRY = "11.0.1.128:30000"          // master IP（已确认）
+// ============================================================
+// 项目 E · damo-app Jenkinsfile —— Helm 化改造版
+//
+// 对比项目 B（裸部署版）的变化：
+//   Stage 4: sed 替换 __IMAGE__ + kubectl apply  →  helm upgrade --install --set image.tag
+//   Stage 5: kubectl get pods                    →  kubectl get pods + helm history
+//   Agent 容器: kubectl 容器                     →  helm 容器（dtzar/helm-kubectl 镜像，
+//                同时含 helm 与 kubectl，Jenkins PodTemplate 需同步改名）
+//   发布语义: apply 是"当前状态对齐"               →  upgrade 生成 revision，可 history/rollback，
+//                且 --atomic 失败自动回滚（坏版本进不了"已发布"状态）
+//
+// 未变化：Stage 1-3（Checkout / Render / Kaniko Build）原样保留。
+// 前置：Jenkins PodTemplate 的容器镜像换为 11.0.1.128:30000/helm-kubectl:v3.16.4
+//       （中转自 dtzar/helm-kubectl，见项目 E 文档阶段 2）。
+// ============================================================
+
+def REGISTRY = "11.0.1.128:30000"
 def APP_NAME = "damo-app"
 def NAMESPACE = "damo-app"
+def CHART_DIR = "chart/damo-app"          // Chart 在仓库中的路径（随本 Chart 一起提交到仓库）
 
 pipeline {
     agent { label 'ci-agent' }
 
     environment {
-        // 本次构建的完整镜像地址：11.0.1.128:30000/damo-app:<构建号>
-        IMAGE = "${REGISTRY}/${APP_NAME}:${env.BUILD_NUMBER}"
-        // 页面显示的构建时间
+        // 镜像 tag = 构建号：不可变交付物，回滚/审计的锚点（与项目 B 同一设计）
+        IMAGE_TAG = "${env.BUILD_NUMBER}"
         BUILD_TIME = sh(script: "date '+%Y-%m-%d %H:%M:%S'", returnStdout: true).trim()
     }
 
@@ -16,7 +32,6 @@ pipeline {
         // ---------- Stage 1: 拉取代码 ----------
         stage('1. Checkout') {
             steps {
-                // 从 Job 的 SCM 配置里拉代码（git clone 到共享 workspace）
                 checkout scm
                 echo "代码已拉取，构建号: ${env.BUILD_NUMBER}"
             }
@@ -25,7 +40,6 @@ pipeline {
         // ---------- Stage 2: 渲染页面占位符 ----------
         stage('2. Render Index') {
             steps {
-                // 把 index.html 里的 __BUILD_NUMBER__ / __BUILD_TIME__ 替换成真实值
                 sh """
                     sed -i 's/__BUILD_NUMBER__/${env.BUILD_NUMBER}/g' index.html
                     sed -i 's/__BUILD_TIME__/${BUILD_TIME}/g' index.html
@@ -41,7 +55,7 @@ pipeline {
                         /kaniko/executor \
                             --context . \
                             --dockerfile Dockerfile \
-                            --destination ${IMAGE} \
+                            --destination ${REGISTRY}/${APP_NAME}:${IMAGE_TAG} \
                             --insecure-registry ${REGISTRY} \
                             --skip-tls-verify
                     """
@@ -49,19 +63,19 @@ pipeline {
             }
         }
 
-        // ---------- Stage 4: 部署到 K8s ----------
-        stage('4. Deploy to K8s') {
+        // ---------- Stage 4: Helm 发布（本项目核心改造点） ----------
+        stage('4. Deploy via Helm') {
             steps {
-                container('kubectl') {
+                container('helm') {
                     sh """
-                        # 创建/确保命名空间
-                        kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
-                        # 把 k8s/deployment.yaml 里的 __IMAGE__ 占位符替换为本次构建的镜像地址
-                        sed -i 's|__IMAGE__|${IMAGE}|g' k8s/deployment.yaml
-                        # 应用全部清单（相对路径，cwd 默认即共享 workspace）
-                        kubectl apply -f k8s/
-                        # 等待滚动更新完成（120 秒超时）
-                        kubectl rollout status deployment/${APP_NAME} -n ${NAMESPACE} --timeout=120s
+                        # upgrade --install：不存在则安装，存在则升级（一条命令通吃首装与迭代）
+                        helm upgrade --install damo-app ${CHART_DIR} \
+                          --namespace ${NAMESPACE} --create-namespace \
+                          --set image.tag=${IMAGE_TAG} \
+                          --atomic --timeout 120s
+                        # --atomic 两个保证：
+                        #   ① 等待所有资源 Ready（等价 --wait）
+                        #   ② 超时/失败自动 helm rollback 到上一 revision —— 坏版本永不生效
                     """
                 }
             }
@@ -70,9 +84,11 @@ pipeline {
         // ---------- Stage 5: 验证 ----------
         stage('5. Verify') {
             steps {
-                container('kubectl') {
+                container('helm') {
                     sh """
                         kubectl get pods -n ${NAMESPACE} -o wide
+                        echo '---- Helm 发布历史 ----'
+                        helm history damo-app -n ${NAMESPACE}
                         echo "---- 访问验证 ----"
                         echo "curl http://11.0.1.128:30090/ 应显示 Build #${env.BUILD_NUMBER}"
                     """
@@ -83,11 +99,11 @@ pipeline {
 
     post {
         success {
-            echo "✅ 构建部署成功: ${IMAGE}"
+            echo "✅ Helm 发布成功: ${REGISTRY}/${APP_NAME}:${IMAGE_TAG}"
             echo "访问: http://11.0.1.128:30090/"
         }
         failure {
-            echo "❌ 构建失败，检查上述日志"
+            echo "❌ 发布失败；若在 Stage 4 失败，--atomic 已自动回滚到上一版本"
         }
     }
 }

@@ -1,0 +1,19 @@
+# ============================================================
+# 项目 E · damo-app Helm Chart —— Chart 元数据
+# Chart.yaml 回答三个问题：这个 Chart 是谁（name）、
+# 模板本身第几版（version）、装的应用是什么版本（appVersion）。
+#
+# 面试点：version 与 appVersion 是两回事——
+#   version: Chart 模板的版本，模板改一行就应递增；
+#   appVersion: 所装应用的语义版本，仅作元信息展示，与镜像 tag 无关。
+#   镜像 tag 由流水线 --set image.tag=${BUILD_NUMBER} 注入，不写死在这里。
+# ============================================================
+apiVersion: v2                # Chart API 版本，Helm 3 固定 v2
+name: damo-app                # Chart 名（= .Chart.Name，模板里引用）
+description: damo-app 静态演示应用的 Helm Chart —— K8s 项目 E（CI/CD 流水线 Helm 化改造）
+type: application             # application=可安装应用；library=被别的 Chart 引用的函数库
+version: 0.1.0                # ★ Chart 自身版本，改模板必须递增（helm 会记录到 release 历史）
+appVersion: "1.0"             # 应用语义版本（字符串必须加引号，否则 1.0 会被解析成浮点）
+maintainers:
+  - name: GXEL-xy             # github.com/GXEL-xy
+    email: 2956446350@qq.com

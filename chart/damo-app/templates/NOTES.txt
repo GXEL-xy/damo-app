@@ -1,0 +1,28 @@
+=====================================================================
+  damo-app 通过 Helm 发布成功（Release 信息即发布审计记录）
+=====================================================================
+
+  Release:    {{ .Release.Name }}  (revision {{ .Release.Revision }})
+  Namespace:  {{ .Release.Namespace }}
+  Chart:      {{ .Chart.Name }}-{{ .Chart.Version }}
+  本次镜像:    {{ .Values.image.repository }}:{{ .Values.image.tag }}
+
+---------------------------------------------------------------------
+  验证发布
+---------------------------------------------------------------------
+  kubectl get pods -n {{ .Release.Namespace }} -o wide
+  curl http://<任一节点IP>:{{ .Values.service.nodePort }}/
+      → 页面应显示 Build #{{ .Values.image.tag }}
+
+---------------------------------------------------------------------
+  常用命令（面试演示清单）
+---------------------------------------------------------------------
+  发布历史     helm history {{ .Release.Name }} -n {{ .Release.Namespace }}
+  查看发布配置 helm get values {{ .Release.Name }} -n {{ .Release.Namespace }}
+  审计渲染结果 helm get manifest {{ .Release.Name }} -n {{ .Release.Namespace }}
+  升级新版本   helm upgrade {{ .Release.Name }} . -n {{ .Release.Namespace }} --set image.tag=<N> --atomic
+  一键回滚     helm rollback {{ .Release.Name }} <revision号> -n {{ .Release.Namespace }}
+
+  注：每次 helm upgrade 都会生成一个新 revision（+1）；
+      --atomic 表示升级失败自动回滚到上一版本（本项目流水线已启用）。
+=====================================================================

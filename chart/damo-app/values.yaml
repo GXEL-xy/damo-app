@@ -1,0 +1,62 @@
+# ============================================================
+# 项目 E · damo-app Helm Chart —— 唯一参数来源（values.yaml）
+#
+# 设计原则（面试可讲）：
+# ① 所有会因环境/发布而变的值，全部收敛到这里，模板零硬编码；
+# ② 键名按"对象.属性"分层，--set 点号路径与这里一一对应；
+# ③ 默认值 = 本集群当前真实运行值（对齐项目 B 裸部署版），
+#    保证"参数化"不改变现有行为，升级无缝。
+#
+# 覆盖优先级（从高到低，面试必背）：
+#   --set image.tag=3  >  -f my-values.yaml  >  chart 自带 values.yaml
+# ============================================================
+
+# ---- 副本数：滚动更新与负载的基础 ----
+replicaCount: 2
+
+# ---- 镜像：仓库地址走私有仓库（项目 B 铁律），tag 留给流水线注入 ----
+image:
+  repository: 11.0.1.128:30000/damo-app
+  tag: "19"             # 手动首装示例：必须填仓库里实际存在的构建号
+                        # （curl http://11.0.1.128:30000/v2/damo-app/tags/list 查）
+                        # 流水线会用 --set image.tag=${BUILD_NUMBER} 覆盖，不存在 tag 问题
+  pullPolicy: Always    # ★ tag 会被"复用"（构建号在重跑时可能相同值），
+                        #   Always 保证每次发布都去仓库核对 digest，杜绝节点旧镜像缓存
+
+# ---- Service：NodePort 30090 沿用项目 B 端口规划（避免全集群端口漂移） ----
+service:
+  type: NodePort
+  port: 80              # Service 自身端口（集群内）
+  nodePort: 30090       # 外部访问端口；留空 "" 则由 K8s 自动分配 30000-32767
+
+# ---- 三探针：全部 tcpSocket（项目 A 血泪教训的定版写法） ----
+# 探针管"进程是否存活"，页面健康交给项目 C 的监控告警
+probes:
+  startup:              # 启动保护：最多给 5+5*30≈155s 冷启动期，期间 liveness 暂停
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    failureThreshold: 30
+  readiness:            # 就绪：端口监听才接流量（滚动更新 0 中断的关键）
+    initialDelaySeconds: 5
+    periodSeconds: 5
+  liveness:             # 存活：端口失联才重启
+    initialDelaySeconds: 10
+    periodSeconds: 10
+
+# ---- 资源配额：requests 保调度，limits 防失控 ----
+resources:
+  requests:
+    cpu: 100m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 128Mi
+
+# ---- HPA 开关（为项目 G 弹性伸缩预留） ----
+# enabled=false 时渲染 replicas: replicaCount；true 时忽略 replicas、
+# 由 HPA 接管副本数（模板里已写好分支，本项目 E 保持 false）
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 75

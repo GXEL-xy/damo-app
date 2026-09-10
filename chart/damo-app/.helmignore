@@ -1,0 +1,17 @@
+# .helmignore：打包/安装时忽略的文件（作用同 .gitignore）
+# ⚠️ 两条硬规则（本项目实战踩坑，2026-09-10）：
+#   ① 只支持整行注释（行首 #），不支持行尾注释——
+#      "规则   # 说明" 整行会被当作一条规则解析，可致 loader 误伤 Chart.yaml，
+#      helm lint 报 "Chart.yaml file is missing"；
+#   ② 文件经 Windows 传输务必确认无 CRLF（od -c 查 \r）。
+# 本仓库 Chart 与应用源码同仓，构建上下文里的杂物不要进 Chart 包
+.git/
+.gitignore
+.github/
+*.md
+Dockerfile
+Jenkinsfile
+index.html
+k8s/
+*.zip
+*.log

@@ -1,0 +1,27 @@
+{{- /* ============================================================
+项目 E · damo-app Helm Chart —— Service 模板
+
+要点：
+① selector 与 Deployment 的 pod labels 同源于 selectorLabels 函数
+   （裸部署时代"selector 改了 Pod 忘改"的经典坑，从模板层面根除）；
+② nodePort 用 if 条件渲染：值为空时不写 nodePort 字段，
+   交给 K8s 自动分配——这是"参数化"的正确姿势，而不是渲染出 nodePort: null。
+============================================================ */ -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "damo-app.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "damo-app.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "damo-app.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http                       {{/* 引用容器端口名，与 deployment.yaml 的 ports.name 呼应 */}}
+      {{- if and (eq .Values.service.type "NodePort") .Values.service.nodePort }}
+      nodePort: {{ .Values.service.nodePort }}
+      {{- end }}
