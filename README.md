@@ -1,7 +1,7 @@
 # damo-app — K8s CI/CD 全自动交付流水线的演示应用
 
 > 一个刻意做"简单"的静态页应用，用来把一整套云原生交付链路**跑通、跑稳、讲清楚**：
-> **git push → Jenkins 动态 Agent → Kaniko 非特权构建 → 私有镜像仓库 → 滚动部署 → 页面验证**，全程无人值守，约 3–5 分钟完成一次发布。
+> **git push → Jenkins 动态 Agent → Kaniko 非特权构建 → 私有镜像仓库 → Helm 标准化发布 → 页面验证**，全程无人值守，约 3–5 分钟完成一次发布。
 
 运行环境：自建三节点 Kubernetes 集群（1 master + 2 worker，v1.35 / containerd 2.x / Ubuntu 24.04）。
 
@@ -21,8 +21,9 @@
                      │  动态 Agent Pod（用完销毁） │                │
                      │  ├─ jnlp    控制通道        │                │
                      │  ├─ kaniko  镜像构建        │──push──►  私有仓库 registry :30000
-                     │  └─ kubectl 集群操作        │                │
+                     │  └─ helm   集群发布        │
                      └─────────────────────────┘                │
+                              helm upgrade --install --set image.tag=N --atomic
                                                   kubelet ──pull──┘ (containerd 私有源)
                                                      │
                                                      ▼
@@ -52,6 +53,7 @@
 | 基础镜像 | `FROM <私有仓库>/nginx:1.27-alpine` | 国内节点直连 Docker Hub 拉不动，且 DNS 污染曾把域名解析到假 IP 导致 Kaniko 静默卡死——基础镜像私有化是根治解 |
 | 触发方式 | Poll SCM（5 min） | 集群在内网，无公网回调入口，GitHub webhook 打不进来。说清限制与替代方案，比假装"配了 webhook"更诚实 |
 | 探针 | 三探针全部 `tcpSocket` | 前序项目实测：`httpGet` 默认 1s 超时会误杀冷启动应用。探针管"进程存活"，页面健康交给监控 |
+| 发布机制 | Helm Chart + `helm upgrade --install --set image.tag=N --atomic` | 裸 apply 时代的 sed 替换不可审计、回滚粒度粗；Chart 化后"发布=报一个参数"，天然获得 revision 发布台账、`helm rollback` 一键回退与失败自动回滚（`--atomic`）。手动跑通四种状态（install/upgrade/rollback/failed）后才交给流水线 |
 
 ## 🔄 流水线五阶段（对应 `Jenkinsfile`）
 
@@ -60,8 +62,8 @@
 | 1. Checkout | `checkout scm` 拉代码 | 共享 workspace，三容器可见 |
 | 2. Render Index | `sed` 渲染 `__BUILD_NUMBER__` / `__BUILD_TIME__` | 让"构建产物"自带版本指纹 |
 | 3. Build Image | kaniko 容器执行 `/kaniko/executor` | `--insecure-registry` 对接内网 HTTP 仓库，产物 `damo-app:<BUILD_NUMBER>` |
-| 4. Deploy to K8s | kubectl 容器 `sed` 替换 `__IMAGE__` → `kubectl apply -f k8s/` → `rollout status` | namespace 幂等创建；120s 发布超时即失败 |
-| 5. Verify | `kubectl get pods -o wide` | 副本分布、Ready 状态一眼核验 |
+| 4. Deploy via Helm | helm 容器执行 `helm upgrade --install --set image.tag=${BUILD_NUMBER} --atomic` | revision 台账可审计；120s 内未 Ready 自动回滚，坏版本进不了"已发布"状态 |
+| 5. Verify | `kubectl get pods` + `helm history` | 副本分布、Ready 状态、发布台账一眼核验 |
 
 ## 📁 仓库结构
 
@@ -69,8 +71,12 @@
 damo-app/
 ├── index.html          # 静态页（含构建号/时间占位符）
 ├── Dockerfile          # FROM 私有仓库 nginx:1.27-alpine，COPY 页面，EXPOSE 80
-├── Jenkinsfile         # 声明式流水线：Checkout → Render → Kaniko Build → Deploy → Verify
-└── k8s/
+├── Jenkinsfile         # 声明式流水线：Checkout → Render → Kaniko Build → Helm Deploy → Verify
+├── chart/damo-app/     # ★ Helm Chart（发布标准形态：templates + values 全参数化）
+│   ├── Chart.yaml      # apiVersion v2 / version 与 appVersion 分离
+│   ├── values.yaml     # 副本/镜像/探针/资源全参数化，流水线 --set image.tag 注入
+│   └── templates/      # _helpers.tpl（标签三处同源）/ deployment / service / NOTES.txt
+└── k8s/                # 前裸部署清单（保留作 Helm 化改造前的对照与回退预案）
     ├── deployment.yaml # 2 副本 / __IMAGE__ 占位 / 三探针 tcpSocket / 资源 requests+limits
     └── service.yaml    # NodePort :30090
 ```
@@ -126,7 +132,7 @@ damo-app/
 
 ## 🗺 Roadmap
 
-- [ ] **Helm 化**：`k8s/` 手写清单升级为 Chart，`helm upgrade --set image.tag=N` 替代 sed 替换
+- [x] **Helm 化**：`k8s/` 手写清单升级为 Chart，`helm upgrade --set image.tag=N --atomic` 替代 sed 替换（2026-09-10 完成全链路：手动验证 install/upgrade/rollback/failed 四状态 → 流水线自动化）
 - [ ] **HPA**：基于 CPU 的自动扩缩容 + 压测演示
 - [ ] **GitOps**：Argo CD 接管部署，Git 仓库成为唯一事实来源
 - [ ] 演示 GIF：滚动更新 Build #N → #N+1 的页面变化
