@@ -65,21 +65,21 @@ pipeline {
 
         // ---------- Stage 4: Helm 发布（本项目核心改造点） ----------
         stage('4. Deploy via Helm') {
-            steps {
-                container('helm') {
-                    sh """
-                        # upgrade --install：不存在则安装，存在则升级（一条命令通吃首装与迭代）
-                        helm upgrade --install damo-app ${CHART_DIR} \
-                          --namespace ${NAMESPACE} --create-namespace \
-                          --set image.tag=${IMAGE_TAG} \
-                          --atomic --timeout 120s
-                        # --atomic 两个保证：
-                        #   ① 等待所有资源 Ready（等价 --wait）
-                        #   ② 超时/失败自动 helm rollback 到上一 revision —— 坏版本永不生效
-                    """
-                }
-            }
-        }
+           steps {
+        // ★ ① 外层包一层 withCredentials，container('helm') 放进去
+               withCredentials([file(credentialsId: 'kubeconfig-damo-deployer', variable: 'KUBECONFIG')]) {
+                  container('helm') {
+                      sh """
+                         helm upgrade --install damo-app chart/damo-app \
+                         --namespace damo-app \
+                         --set image.tag=${IMAGE_TAG} \
+                         --atomic --timeout 120s
+                         # ★ ② 删掉 --create-namespace（新 SA 只给了 namespaces 的 get，没有 create）
+                         """
+                     }
+                 }
+             }
+         }
 
         // ---------- Stage 5: 验证 ----------
         stage('5. Verify') {
