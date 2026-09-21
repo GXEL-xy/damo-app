@@ -84,18 +84,19 @@ pipeline {
         // ---------- Stage 5: 验证 ----------
         stage('5. Verify') {
             steps {
-                container('helm') {
-                    sh """
-                        kubectl get pods -n ${NAMESPACE} -o wide
-                        echo '---- Helm 发布历史 ----'
-                        helm history damo-app -n ${NAMESPACE}
-                        echo "---- 访问验证 ----"
-                        echo "curl http://11.0.1.128:30090/ 应显示 Build #${env.BUILD_NUMBER}"
-                    """
-                }
-            }
-        }
-    }
+                withCredentials([file(credentialsId: 'kubeconfig-damo-deployer', variable: 'KUBECONFIG')]){
+                  container('helm') {
+                      sh """
+                          kubectl get pods -n ${NAMESPACE} -o wide
+                          echo '---- Helm 发布历史 ----'
+                          helm history damo-app -n ${NAMESPACE}
+                          echo "---- 访问验证 ----"
+                          echo "curl http://11.0.1.128:30090/ 应显示 Build #${env.BUILD_NUMBER}"
+                      """
+                  }
+              }
+          }
+      }
 
     post {
         success {
