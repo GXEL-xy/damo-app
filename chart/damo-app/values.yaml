@@ -1,14 +1,21 @@
 # ============================================================
-# 项目 E · damo-app Helm Chart —— 唯一参数来源（values.yaml）
+# 项目 F · 安全加固 —— damo-app Chart 的【完整 values.yaml】（加固版）
 #
-# 设计原则（面试可讲）：
-# ① 所有会因环境/发布而变的值，全部收敛到这里，模板零硬编码；
-# ② 键名按"对象.属性"分层，--set 点号路径与这里一一对应；
-# ③ 默认值 = 本集群当前真实运行值（对齐项目 B 裸部署版），
-#    保证"参数化"不改变现有行为，升级无缝。
+# ★ 放置位置：<chart目录>/values.yaml（覆盖项目 E 的原始版本）
 #
-# 覆盖优先级（从高到低，面试必背）：
-#   --set image.tag=3  >  -f my-values.yaml  >  chart 自带 values.yaml
+# 本文件 = 项目 E 原始 values.yaml + 项目 F 的全部新增：
+#   ① service.externalTrafficPolicy: Local      （阶段 4.4，规则① 的配套前置条件）
+#   ② probes.timeoutSeconds: 1                  （阶段 4.3，跨 CNI 的健壮性投资）
+#   ③ serviceAccount 段                          （阶段 3，专用 SA + 不挂 token）
+#   ④ networkPolicy 段（含 egress）               （阶段 4，NetworkPolicy 开关与白名单参数）
+#
+# ★★ 为什么项目 F 的改动不直接回写项目 E 的目录：
+#   项目 E 保持"Helm 化改造"当时的原始形态（它是独立作品）；
+#   项目 F 是"安全加固"，它的全部产物都收敛在本目录（chart-patch/），
+#   部署时用本目录的文件覆盖 chart，再用 values-prod.yaml 打开开关。
+#   这样两个项目各自自包含，也不会互相污染。
+#
+# 覆盖优先级（从高到低）：--set  >  -f values-prod.yaml  >  本文件  >  chart 自带 values.yaml
 # ============================================================
 
 # ---- 副本数：滚动更新与负载的基础 ----
@@ -28,10 +35,41 @@ service:
   type: NodePort
   port: 80              # Service 自身端口（集群内）
   nodePort: 30090       # 外部访问端口；留空 "" 则由 K8s 自动分配 30000-32767
+  # ★ 项目 F 新增（阶段 4.4，2026-09-23 抓包实测后定版）：
+  #   Local = NodePort 流量【不再 SNAT】，源 IP 保留为真实客户端 IP。
+  #   为什么必须设（否则 NetworkPolicy 规则① 失效）：
+  #     Cluster（默认）策略下，NodePort 包出 IPIP 隧道时被 MASQUERADE，
+  #     源 IP 被改写成【节点隧道地址，落在 Pod 网段】（本集群实测 10.244.219.64）
+  #     → NetworkPolicy 里写 ipBlock: <节点网段> 永远匹配不到 → 被静默丢弃。
+  #   代价（务必知道）：流量只落到【接收请求的那个节点上】的 Pod；
+  #     本集群 master 上不跑业务 Pod → 11.0.1.128:30090 会 refused，
+  #     外部访问要打【有 Pod 的节点】：11.0.1.129:30090 / 11.0.1.130:30090。
+  externalTrafficPolicy: Local
 
 # ---- 三探针：全部 tcpSocket（项目 A 血泪教训的定版写法） ----
 # 探针管"进程是否存活"，页面健康交给项目 C 的监控告警
+#
+# ★ timeoutSeconds 为什么显式写 1（★ 附一条易错点纠正，面试高频）：
+#   【机制】tcpSocket 探针的判定规则是"【在 timeoutSeconds 内没收到 TCP RST】就算成功"——
+#     也就是说，正常情况下探针是【靠被拒绝】来通过的。
+#     若某条路径把"立刻回 RST"变成"静默丢包"（如 NetworkPolicy 拦截、
+#     或防火墙 DROP 而非 REJECT），超时值就决定了这个异常能不能被识别：
+#     超时短 → 探针失败（异常暴露）；超时长 → 读不到响应也算成功（异常被掩盖）。
+#   ★★【易错点】Probe.timeoutSeconds 的 K8s 默认值【本来就是 1 秒】——
+#     不是 30（30 是 terminationGracePeriodSeconds 的默认值，两者容易混）。
+#     所以显式写 1 在功能上【不改变当前行为】，它是把隐含的 API 默认值显式化。
+#     本文档早期曾把"Pod 读出 timeoutSeconds=1"误当成"chart 已经改过"，
+#     其实那只是默认值 —— 这个教训本身也值得记。
+#   【那还值得写吗】值得，但理由要换：
+#     ① 显式化契约：值写在 chart 里，读代码/评审时一眼可见；
+#     ② 防误改：未来有人把探针换成 httpGet 或调整超时时，它是一个锚点；
+#     ③ 可参数化：能按环境覆写（本项目的 probes.timeoutSeconds 就是这样的参数）。
+#   ★ 实测补充（2026-09-23，Calico IPIP）：本集群 kubelet 的 tcpSocket 探针目标是
+#     本机 Pod，流量走本机路由直达 veth、【不进入 cali-* 策略链】，
+#     所以 NetworkPolicy 默认拒绝【不会】影响它（Pod 仍 READY、Endpoints 仍正常）。
+#     因此这个值在本集群不改变任何现象。
 probes:
+  timeoutSeconds: 1     # 三探针共用（也可各自覆写）
   startup:              # 启动保护：最多给 5+5*30≈155s 冷启动期，期间 liveness 暂停
     initialDelaySeconds: 5
     periodSeconds: 5
@@ -54,9 +92,100 @@ resources:
 
 # ---- HPA 开关（为项目 G 弹性伸缩预留） ----
 # enabled=false 时渲染 replicas: replicaCount；true 时忽略 replicas、
-# 由 HPA 接管副本数（模板里已写好分支，本项目 E 保持 false）
+# 由 HPA 接管副本数（本项目 E 保持 false）
 autoscaling:
   enabled: false
   minReplicas: 2
   maxReplicas: 6
   targetCPUUtilizationPercentage: 75
+
+# ============================================================
+# ---- 项目 F · 安全加固（以下全部为新增）----
+# ============================================================
+
+# ---- ServiceAccount 与凭证挂载（阶段 3）----
+serviceAccount:
+  create: true
+  # 专用 SA 名（不叫 default，避免"共享身份"的连带授权风险）
+  name: damo-app-sa
+  # ★ 是否向容器挂载 API token。
+  #   false：容器内没有 /var/run/secrets/kubernetes.io/serviceaccount/token
+  #          适合不需要调用 K8s API 的应用（本项目）—— 最小权限的极致
+  #   true ：仅当应用确实需要访问 API（如 Operator、控制器）时才打开
+  automountToken: false
+
+# ---- NetworkPolicy 总开关（阶段 4）----
+# ★★ 关键约定：开关的值要【提交在 git 里】（用 values-prod.yaml + -f），
+#    不要靠 `helm upgrade --set` —— 否则下次有人不带这个 flag 升级，
+#    策略会全部消失、直接回到裸奔，而且没人会发现（服务照常是通的）。
+#    详见实战文档 §4.7.5。
+networkPolicy:
+  enabled: false                # 默认关闭（与项目 E 的 HPA 开关同一套设计模式）；
+                                # 生产用 values-prod.yaml 打开
+  # ★ 节点网段：放行【源 IP 确实落在该网段】的流量。
+  #   它必须配合上面的 service.externalTrafficPolicy: Local 才有意义 ——
+  #   Local 保留客户端真实源 IP，这条 ipBlock 才能命中；
+  #   若用默认的 Cluster 策略，NodePort 源 IP 会被 MASQUERADE 成
+  #   【节点隧道地址，落在 Pod 网段】（本集群实测 10.244.219.64）→ 永远匹配不到。
+  #   （2026-09-23 抓包实测，详见实战文档 §4.4）
+  # ★ 常见误传：这条【不是】为了放行 kubelet 探针 —— tcpSocket 探针目标是本机 Pod，
+  #   流量走本机路由直达 veth，不进 Calico 的 cali-* 策略链，不受默认拒绝影响
+  #   （实测 default-deny 生效期间 Pod 仍 READY 1/1）。
+  nodeCidr: 11.0.1.0/24
+  # 同命名空间内按标签放行的 Pod（压测、联调）
+  allowedPodLabels:
+    - app: loadgen
+  # 按命名空间整体放行（如 ingress controller）；
+  # kubernetes.io/metadata.name 是 K8s 1.21+ 自动为每个命名空间打的标签
+  allowedNamespaces:
+    - ingress-nginx
+  # DNS 所在命名空间
+  dnsNamespace: kube-system
+  # 额外的出方向 CIDR 白名单（默认空）。
+  # ★ 每加一条都要写明理由，否则"随手放行"就等于没有 egress 边界
+  extraEgressCidrs: []
+  #  - 10.0.0.0/8      # 例：需要访问内网某数据库，理由：XXX
+
+  # ---- 出方向白名单：压测/联调负载（★ 与上面的 allowedPodLabels 是【镜像】关系）----
+  # ★★ 为什么必须配（不配会出事）：
+  #   egress 默认拒绝会把【整个命名空间】的出方向全拒，包括 loadgen。
+  #   而项目 G 的 HPA 就是靠 loadgen 打流量触发扩容的 ——
+  #   不给它放行，压测链路直接断掉，HPA 再也扩不起来。
+  # ★ 为什么单独一条策略、而不是塞进 default-deny-egress：
+  #   那条的 podSelector 是 {}（整个命名空间），在里面加规则等于给所有 Pod 开口子。
+  # ★ 一次成功通信要过【源端 egress + 目的端 ingress】两道关：
+  #   这里的 egress 与 allow-ingress 的"按标签放行"是一对，缺一不可。
+  egress:
+    # 允许哪些【源】Pod 主动访问业务（留空 / 删掉 = 不渲染这条白名单）
+    loadtestPodLabels:
+      app: loadgen
+    # 它们要访问的目标端口（通常 = service.port）
+    loadtestTargetPort: 80
+
+# ---- 容器安全上下文（阶段 5：追加加固，渐进式）----
+# 设计：前三条【默认打开】（不影响现有镜像）；后两条【注释保留】并写明原因（需镜像配合）。
+# ★ "我改了能改的，并且明确记下改不了的为什么改不了" —— 比"全都改了但服务起不来"或"都没改"都好。
+securityContext:
+  # ① 禁止提权：容器进程不能获得比父进程更多的权限
+  allowPrivilegeEscalation: false
+  # ② 丢弃所有 Linux capabilities
+  capabilities:
+    drop: ["ALL"]
+    # ★★ 这条是本项唯一的坑，别照抄网上"drop ALL 就完事"：
+    #   nginx 以 root 启动并绑定 80 端口；绑定 <1024 端口需要 CAP_NET_BIND_SERVICE，
+    #   除非该 netns 的 net.ipv4.ip_unprivileged_port_start = 0
+    #   （containerd 的 enable_unprivileged_ports 为 true 时会是这样）。
+    #   → 【先试纯 drop: ALL】：
+    #        Pod 正常起来 → 保持现状（最干净）
+    #        EACCES / CrashLoopBackOff → 加回【恰好那一个】：
+    #          add: ["NET_BIND_SERVICE"]
+    #   ★ 面试话术：**最小权限不是"什么都不给"，而是"只给必需的那一个"。**
+    # add: ["NET_BIND_SERVICE"]
+  # ③ seccomp：用运行时默认白名单过滤危险系统调用
+  seccompProfile:
+    type: RuntimeDefault
+  # ④ 只读根文件系统（nginx 需额外挂载 /var/cache/nginx、/var/run 才可行）
+  # readOnlyRootFilesystem: true
+  # ⑤ 以非 root 运行（nginx 官方镜像默认 root 启动绑 80）
+  # runAsNonRoot: true
+  # runAsUser: 101

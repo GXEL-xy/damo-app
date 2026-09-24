@@ -1,0 +1,33 @@
+# ============================================================
+# 项目 F · 生产环境 values（★ 请提交进 git，用 -f 引用）
+#
+# 为什么单独一份，而不是直接改 values.yaml：
+#   chart 自带的 values.yaml 要保留"新人友好"的默认
+#   （NetworkPolicy 关闭，clone 下来 install 就能跑起来）；
+#   生产配置放这里，用 -f 覆盖 —— 有 git 记录可审计。
+#
+# 用法（★ 在项目 F 的 chart-patch 文件覆盖到 chart 之后）：
+#   helm upgrade damo-app <chart目录> -n damo-app \
+#     -f <chart目录>/values-prod.yaml --atomic --timeout 3m
+#
+# ★★ 为什么必须写进文件、不能靠 --set：
+#   如果靠 `helm upgrade --set networkPolicy.enabled=true` 打开，
+#   那这个开关就【只活在命令行里】—— 下次有人不带这个 flag 升级，
+#   5 条 NetworkPolicy 会全部消失、直接回到裸奔，
+#   而且没人会发现（服务照常是通的）。
+#   详见实战文档 §4.7.5。
+# ============================================================
+
+image:
+  tag: "19"                 # 生产固定 tag（流水线会用 --set image.tag=N 覆盖）
+
+# ---- ★ 加固总开关：固化在 git 里 ----
+networkPolicy:
+  enabled: true
+
+# ---- Service 的前置条件（必须与上面同时生效）----
+#   NodePort 不再 SNAT，客户端真实源 IP 被保留，
+#   networkPolicy.nodeCidr 的 ipBlock 才能真正命中。
+#   （2026-09-23 抓包实测，详见实战文档 §4.4）
+service:
+  externalTrafficPolicy: Local

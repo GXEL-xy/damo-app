@@ -1,0 +1,182 @@
+{{- /* ============================================================
+项目 F · damo-app Chart —— NetworkPolicy 模板
+放置位置：chart/damo-app/templates/networkpolicy.yaml
+
+为什么放进 Chart：政策即代码。手 apply 的策略不在交付物里，
+命名空间重建/灾备恢复后会丢失；放进 Chart 才能随发布一起生效。
+
+默认 enabled=false 是为了兼容项目 E 的既有环境（与 HPA 开关同一套设计模式），
+需要启用时用【生产 values 文件】打开（★ 不要用 --set，那样不算固化，下次升级就丢）：
+  # <chart目录>/values-prod.yaml 里写 networkPolicy.enabled: true（提交进 git）
+  helm upgrade damo-app <chart目录> -n damo-app -f <chart目录>/values-prod.yaml --atomic
+详见实战文档 §4.7.5「为什么用 --set 打开不算固化」。
+
+★ 注意：本文件渲染【默认拒绝 × 2】+【白名单 × 3】共 5 份策略
+  （其中 ⑤ 需要 values 里配了 networkPolicy.egress.loadtestPodLabels 才会渲染，
+   没配就是 4 份 —— 那会导致 loadgen 出不去，见下方 ★★ ②）。
+  NetworkPolicy 之间是"允许"的并集，不存在优先级覆盖，
+  所以"全拒 + 白名单"共存时最终效果 = 白名单。
+
+★★ 两个必须配套的前置条件（否则放行会"看起来没生效"）：
+  ① Service 必须是 externalTrafficPolicy: Local
+     —— 否则 NodePort 的源 IP 会被 MASQUERADE 成节点隧道地址（落在 Pod 网段），
+        下面规则① 的 ipBlock: <节点网段> 永远匹配不到。
+        （2026-09-23 抓包实测，详见实战文档 §4.4）
+  ② 一次成功通信要过【源端 egress + 目的端 ingress】两道关；
+     只放行一边照样不通。所以 ⑤ 是 ③ 的镜像，两者缺一不可。
+============================================================ */ -}}
+{{- if .Values.networkPolicy.enabled }}
+# ① 入方向默认拒绝
+#    ⚠️ 不写 ingress: 段才是全拒；写成 ingress: [{}] 会变成"允许所有来源"
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: damo-app-default-deny-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "damo-app.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+# ② 出方向默认拒绝
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: damo-app-default-deny-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "damo-app.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+---
+# ③ 入方向白名单：节点网段 / 同命名空间按标签放行的 Pod / 按命名空间整体放行
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: damo-app-allow-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "damo-app.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "damo-app.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    # ★ 规则① 放行【源 IP 确实落在该网段】的流量。
+    #   配合 Service 的 externalTrafficPolicy: Local，外部 NodePort 客户端
+    #   （如宿主机 11.0.1.1）的真实源 IP 被保留，从而命中这条规则。
+    #   ✅ 实测（2026-09-23）：Local 下 Windows 客户端访问返回 200；
+    #   ❌ 反例：Cluster（默认）策略下源 IP 被 MASQUERADE 成 10.244.219.64（Pod 网段），
+    #      这条 ipBlock 永远匹配不到 → 外部访问全断。详见实战文档 §4.4。
+    # ⚠️ 常见误传：这条不为 kubelet 探针而设 —— tcpSocket 探针目标是本机 Pod，
+    #    流量走本机路由直达 veth，不进 Calico 的 cali-* 策略链（实测 Pod 仍 READY 1/1）。
+    - from:
+        - ipBlock:
+            cidr: {{ .Values.networkPolicy.nodeCidr }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.port }}
+    # ★ 规则② 同命名空间内按标签放行（压测/联调负载）
+    {{- range .Values.networkPolicy.allowedPodLabels }}
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+    {{- end }}
+    # ★ 规则③ 按命名空间整体放行（如 ingress controller）；
+    #    kubernetes.io/metadata.name 是 K8s 1.21+ 自动打的命名空间标签
+    {{- range .Values.networkPolicy.allowedNamespaces }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . }}
+    {{- end }}
+---
+# ④ 出方向白名单：只放行 DNS（够用即止）
+#    ★ namespaceSelector 与 podSelector 写在【同一个数组元素】里是 AND 关系
+#      （既在 kube-system，又带 k8s-app=kube-dns 标签）—— 范围更小更精确。
+#      拆成两个数组元素就变成 OR，等于放行整个 kube-system —— 最阴的语法点。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: damo-app-allow-egress-dns
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "damo-app.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.dnsNamespace }}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- range .Values.networkPolicy.extraEgressCidrs }}
+    # 额外的出方向放行：每一条都要写明理由，避免"随手放行"变成"没有边界"
+    - to:
+        - ipBlock:
+            cidr: {{ . }}
+    {{- end }}
+{{- if and .Values.networkPolicy.egress .Values.networkPolicy.egress.loadtestPodLabels }}
+---
+# ⑤ 出方向白名单：压测/联调负载 → 业务 Pod
+#    ★ 为什么必须单独一条、而不是塞进 ② 或 ④：
+#      ② 和 ④ 的 podSelector 都是 {}（整个命名空间），在里面加规则等于
+#      给【所有 Pod】都开了这个口子，粒度就糊了。
+#      业务 Pod 的出方向应当保持全拒。
+#    ★ 它与 ③ 的规则② 是【镜像】关系：
+#        ③ 管"loadgen 能不能进来"（目的端 ingress）
+#        ⑤ 管"loadgen 能不能出去"（源端 egress）
+#      只放行一边照样不通 —— 这是 NetworkPolicy 最容易被忽略的一点。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: damo-app-allow-egress-loadtest
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "damo-app.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml .Values.networkPolicy.egress.loadtestPodLabels | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    # 出方向① 到业务 Pod 的应用端口
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "damo-app.selectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.egress.loadtestTargetPort }}
+    # 出方向② DNS（原理同 ④）
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.dnsNamespace }}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- end }}
+{{- end }}

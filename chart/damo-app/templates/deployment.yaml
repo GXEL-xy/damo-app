@@ -1,15 +1,30 @@
 {{- /* ============================================================
-项目 E · damo-app Helm Chart —— Deployment 模板
+项目 F · 安全加固 —— damo-app Chart 的 Deployment 模板（加固版）
+★ 放置位置：<chart目录>/templates/deployment.yaml（覆盖项目 E 的原始版本）
 
-对比项目 B 裸部署版的三个本质变化（面试核心叙事）：
-① image 不再是 __IMAGE__ 占位符靠 sed 替换，
-   而是 {{ .Values.image.repository }}:{{ .Values.image.tag }}——
-   渲染时求值，helm upgrade --set image.tag=N 即发布；
-② 标签/选择器收敛到 _helpers.tpl，Deployment 与 Service 永不失配；
-③ 所有数值来自 values.yaml，改副本数/配额/探针 = 改一行参数 + 一条命令。
+本文件 = 项目 E 原始 deployment.yaml + 项目 F 的两处新增：
+  ① 三探针的 timeoutSeconds（阶段 4.3）
+     tcpSocket 的判定是"未收到 RST 即成功"；若某条路径变成"静默丢包"，
+     超时值就决定了"连不上"会不会被误判为"健康"。
+     ★★ 重要纠正：Probe.timeoutSeconds 的 K8s 默认值【本来就是 1 秒】
+        （30 是 terminationGracePeriodSeconds 的默认值，两者别混 ——
+          本文档早期写错了这一点）。
+        所以显式写 1 在功能上是【把隐含的 API 默认值显式化】，不改变当前行为；
+        它的价值在于：① 读代码时一眼可见，不必去查 API 默认值；
+        ② 未来有人把探针换成 httpGet / 调整超时时，它是一个"锚点"，防被改坏；
+        ③ 可按环境参数化覆写。
+     本集群探针不进 cali-* 链、不受 netpol 影响（实测 2026-09-23），
+     所以这个值在当前环境不改变任何现象。
+  ② serviceAccountName + automountServiceAccountToken（阶段 3）
+     用专用 SA（不叫 default）+ 不向容器挂载 API token。
+     静态页服务不调用 K8s API，不挂 token 就没有凭证可泄漏 ——
+     最小权限的极致：不是少给权限，而是不给身份。
+     ★ SA 的"双保险"：serviceaccount.yaml 里也设了
+       automountServiceAccountToken: false，即使某个 Pod 忘了写也不会挂载。
 
-部署顺序：kubectl apply -f chart/  ❌ 不存在的事——Chart 由 helm 安装：
-  helm upgrade --install damo-app . -n damo-app --create-namespace --set image.tag=N
+⚠️ 前置条件：values 里 serviceAccount.create 为 true 时，
+   集群中必须存在名为 serviceAccount.name 的 SA（本 Chart 的
+   templates/serviceaccount.yaml 会创建它）。若它不存在 → Pod 创建失败。
 ============================================================ */ -}}
 apiVersion: apps/v1
 kind: Deployment
@@ -30,10 +45,27 @@ spec:
       labels:
         {{- include "damo-app.selectorLabels" . | nindent 8 }}
     spec:
+      # ★ 项目 F 新增（阶段 3「最小权限」的固化）：
+      #   ① 用专用 SA（不叫 default，避免"共享身份"的连带授权风险）
+      #   ② 不向容器挂载 API token —— 静态页服务不调用 K8s API，
+      #      不挂 token 就没有凭证可泄漏（最小权限的极致：不是少给权限，而是不给身份）
+      #   ★ `and` 短路：values 里没有 serviceAccount 段时也不报错，只是不渲染
+      {{- if and .Values.serviceAccount .Values.serviceAccount.create }}
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountToken }}
+      {{- end }}
       containers:
         - name: {{ .Chart.Name }}                    # 容器名用 Chart 名，足够稳定
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # ★ 项目 F 新增（阶段 5 追加加固）：
+          #   禁止提权 + 丢弃 capabilities + seccomp 白名单。
+          #   ⚠️ nginx 绑 80 端口可能需要 CAP_NET_BIND_SERVICE ——
+          #      先试纯 drop: ALL，起不来再在 values 里 add 回那一个（见 values.yaml 注释）。
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - name: http                             # ★ 端口命名：探针引用 name 而非数字，
               containerPort: 80                      #   以后改端口只改这一处
@@ -43,6 +75,8 @@ spec:
               port: http
             initialDelaySeconds: {{ .initialDelaySeconds }}
             periodSeconds: {{ .periodSeconds }}
+            # ★ 项目 F 新增：值来自 values.yaml 的 probes.timeoutSeconds（见文件头说明）
+            timeoutSeconds: {{ $.Values.probes.timeoutSeconds }}
             failureThreshold: {{ .failureThreshold }}
           {{- end }}
           readinessProbe:                            # 就绪：不接流量（滚动更新 0 中断的关键）
@@ -50,10 +84,12 @@ spec:
               port: http
             initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.timeoutSeconds }}
           livenessProbe:                             # 存活：失败才重启
             tcpSocket:
               port: http
             initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.timeoutSeconds }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}   {{/* toYaml：整块 map 直接转 YAML */}}

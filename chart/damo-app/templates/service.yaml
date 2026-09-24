@@ -1,11 +1,23 @@
 {{- /* ============================================================
-项目 E · damo-app Helm Chart —— Service 模板
+项目 F · 安全加固 —— damo-app Chart 的 Service 模板（加固版）
+★ 放置位置：<chart目录>/templates/service.yaml（覆盖项目 E 的原始版本）
 
-要点：
-① selector 与 Deployment 的 pod labels 同源于 selectorLabels 函数
-   （裸部署时代"selector 改了 Pod 忘改"的经典坑，从模板层面根除）；
-② nodePort 用 if 条件渲染：值为空时不写 nodePort 字段，
-   交给 K8s 自动分配——这是"参数化"的正确姿势，而不是渲染出 nodePort: null。
+本文件 = 项目 E 原始 service.yaml + 项目 F 的一处新增：
+  externalTrafficPolicy（阶段 4.4，2026-09-23 抓包实测后定版）
+
+为什么必须设 Local：
+  Cluster（默认）策略下，NodePort 的包出 IPIP 隧道时被 MASQUERADE，
+  源 IP 被改写成【节点隧道地址、落在 Pod 网段】（本集群实测 10.244.219.64）
+  → NetworkPolicy 里写 ipBlock: <节点网段> 永远匹配不到 → 外部访问全断。
+  设成 Local 后 NodePort 不再 SNAT，客户端真实源 IP 被保留，
+  ipBlock 才能写出有意义的、精确的规则。
+
+代价（务必知道）：流量只落到【接收请求的那个节点上】的 Pod。
+  本集群 master 不跑业务 Pod → 11.0.1.128:30090 会 refused，
+  外部访问要打【有 Pod 的节点】：11.0.1.129:30090 / 11.0.1.130:30090。
+  集群内访问（ClusterIP / Service 域名）不受影响。
+
+★ 只在 NodePort 类型下渲染 —— ClusterIP 时该字段无意义。
 ============================================================ */ -}}
 apiVersion: v1
 kind: Service
@@ -16,6 +28,13 @@ metadata:
     {{- include "damo-app.labels" . | nindent 4 }}
 spec:
   type: {{ .Values.service.type }}
+  {{- /* ★ 项目 F 新增：externalTrafficPolicy。
+         为什么写成条件渲染而不是直接写死：
+         这样"是否保留源 IP"变成一个可由 values 控制的行为，
+         而不是散落在模板里的硬编码 —— 与项目 E "参数化"的设计原则一致。 */}}
+  {{- if and (eq .Values.service.type "NodePort") .Values.service.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ .Values.service.externalTrafficPolicy }}
+  {{- end }}
   selector:
     {{- include "damo-app.selectorLabels" . | nindent 4 }}
   ports:
