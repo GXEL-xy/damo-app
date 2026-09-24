@@ -60,8 +60,11 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           # ★ 项目 F 新增（阶段 5 追加加固）：
           #   禁止提权 + 丢弃 capabilities + seccomp 白名单。
-          #   ⚠️ nginx 绑 80 端口可能需要 CAP_NET_BIND_SERVICE ——
-          #      先试纯 drop: ALL，起不来再在 values 里 add 回那一个（见 values.yaml 注释）。
+          #   ⚠️ capabilities 的"最小集"是【实测】出来的（详见 values.yaml 的记录）：
+          #      纯 drop: ["ALL"] 会让 nginx 因 chown 缓存目录失败而退出
+          #      —— 需要 CAP_CHOWN（★ 不是网上常说的 NET_BIND_SERVICE，我一开始就猜错了）；
+          #      另外还需要 SETGID/SETUID 才能降权起 worker。
+          #      所以按实测结果 add 回了那 4 个。
           {{- with .Values.securityContext }}
           securityContext:
             {{- toYaml . | nindent 12 }}

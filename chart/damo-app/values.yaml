@@ -169,18 +169,42 @@ securityContext:
   # ① 禁止提权：容器进程不能获得比父进程更多的权限
   allowPrivilegeEscalation: false
   # ② 丢弃所有 Linux capabilities
+  #    ★★ 这一项的"最小集"是【实测】出来的，别照抄网上 —— 记录如下：
+  #    ------------------------------------------------------------
+  #    【第一轮实测 2026-09-24】纯 drop: ["ALL"] → 容器起不来，报：
+  #        nginx: [emerg] chown("/var/cache/nginx/client_temp", 101)
+  #               failed (1: Operation not permitted)
+  #      ★ 注意【不是】网上常说的"绑 80 端口失败"（NET_BIND_SERVICE）——
+  #        而是 chown 失败：nginx master 以 root 启动时会把缓存目录 chown 给
+  #        worker 用户（uid 101），chown 需要 CAP_CHOWN；被 drop 掉就 EPERM。
+  #        这一步发生在【绑定端口之前】，所以根本走不到 bind 那一步。
+  #      ✅ 同轮对照组证明：只加 NET_BIND_SERVICE 【没用】（同样报 chown 错）。
+  #      → 结论：**别凭网上的说法猜需要哪个 capability，要实测。**
+  #    ------------------------------------------------------------
+  #    【第二轮实测 · 已确认】逐项加回，最小集 = 下面这 4 个：
+  #      · CHOWN            → chown 缓存目录给 worker 用户（第一轮的拦路者）
+  #      · NET_BIND_SERVICE → 绑定 80 端口
+  #      · SETGID / SETUID  → 降权起 worker（切到 nginx 用户）
+  #      ✅ 实测：只加 CHOWN → master 起来了，但
+  #           `worker process exited with fatal code 2 and cannot be respawned`
+  #           （缺 SETUID/SETGID，降权失败）→ 不够。
+  #      ✅ 实测：加齐这 4 个 → worker 正常启动，服务可用。
+  #      ✅ 实测：再加 DAC_OVERRIDE 与不加没区别 → 【不需要】，故不写。
   capabilities:
     drop: ["ALL"]
-    # ★★ 这条是本项唯一的坑，别照抄网上"drop ALL 就完事"：
-    #   nginx 以 root 启动并绑定 80 端口；绑定 <1024 端口需要 CAP_NET_BIND_SERVICE，
-    #   除非该 netns 的 net.ipv4.ip_unprivileged_port_start = 0
-    #   （containerd 的 enable_unprivileged_ports 为 true 时会是这样）。
-    #   → 【先试纯 drop: ALL】：
-    #        Pod 正常起来 → 保持现状（最干净）
-    #        EACCES / CrashLoopBackOff → 加回【恰好那一个】：
-    #          add: ["NET_BIND_SERVICE"]
-    #   ★ 面试话术：**最小权限不是"什么都不给"，而是"只给必需的那一个"。**
-    # add: ["NET_BIND_SERVICE"]
+    add: ["CHOWN", "NET_BIND_SERVICE", "SETGID", "SETUID"]
+  #    ⚠️★ 验证陷阱（实测踩到）：只加 CHOWN 的那个 Pod 状态显示 `1/1 Running`，
+  #        但它的 worker 全挂了（master 进程还活着，所以 Pod 不会退出）。
+  #        → **资源状态 ≠ 服务可用**；判据必须看【日志里 worker 有没有正常启动】。
+  #        （与项目 F 阶段 4 的 NetworkPolicy 那次是同一类陷阱。）
+  # ★ 面试话术：**最小权限不是"什么都不给"，而是"只给必需的那一个"。**
+  #   而"必需的那一个/那几个"**必须用实测确定** —— 我一开始也猜错了
+  #   （以为是 NET_BIND_SERVICE，实测发现是 CHOWN）。
+  #
+  # ★ 进阶路线（真正的"零 capability"）：改用【非 root 镜像】
+  #   （如 nginx-unprivileged，监听 8080）+ runAsNonRoot + readOnlyRootFilesystem，
+  #   那时 drop: ["ALL"] 就真够了。代价是要改 Dockerfile / 端口 / Service.targetPort。
+  #   详见实战文档 §5.2 末尾。
   # ③ seccomp：用运行时默认白名单过滤危险系统调用
   seccompProfile:
     type: RuntimeDefault
