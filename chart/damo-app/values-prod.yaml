@@ -1,21 +1,31 @@
 # ============================================================
-# 项目 F · 生产环境 values（★ 请提交进 git，用 -f 引用）
+# damo-app Chart · 生产环境 values（★ 固化在 git 里，用 -f 引用）
 #
-# 为什么单独一份，而不是直接改 values.yaml：
+# ★★ 这是一个【chart 层】的文件，跨项目累积 —— 不属于某一个项目：
+#     · 项目 F（安全加固）建立：networkPolicy / service.externalTrafficPolicy
+#     · 项目 G（弹性伸缩）追加：autoscaling
+#     · 后续项目的生产开关也加这里
+#    权威副本同时存在两处，保持一致：
+#      仓库：chart/damo-app/values-prod.yaml                  ← 部署时的真实来源
+#      工作区：K8s项目F_安全加固/chart-patch/values-prod.yaml   ← 建立它的项目里留一份
+#    （G 的 chart-patch 只放 hpa.yaml；对本文件的改动记录在 G 的文档里）
+#
+# 为什么单独一份，而不是直接改 chart 自带的 values.yaml：
 #   chart 自带的 values.yaml 要保留"新人友好"的默认
-#   （NetworkPolicy 关闭，clone 下来 install 就能跑起来）；
+#   （NetworkPolicy / HPA 都关闭，clone 下来 install 就能跑起来）；
 #   生产配置放这里，用 -f 覆盖 —— 有 git 记录可审计。
 #
-# 用法（★ 在项目 F 的 chart-patch 文件覆盖到 chart 之后）：
-#   helm upgrade damo-app <chart目录> -n damo-app \
-#     -f <chart目录>/values-prod.yaml --atomic --timeout 3m
+# 用法：
+#   ① 手动：
+#      helm upgrade damo-app chart/damo-app -n damo-app \
+#        -f chart/damo-app/values-prod.yaml --atomic --timeout 3m
+#   ② 流水线：Jenkinsfile 的 Stage 4 已带 `-f chart/damo-app/values-prod.yaml`
+#      → 日常发布自动带上加固与弹性伸缩。
 #
 # ★★ 为什么必须写进文件、不能靠 --set：
-#   如果靠 `helm upgrade --set networkPolicy.enabled=true` 打开，
-#   那这个开关就【只活在命令行里】—— 下次有人不带这个 flag 升级，
-#   5 条 NetworkPolicy 会全部消失、直接回到裸奔，
-#   而且没人会发现（服务照常是通的）。
-#   详见实战文档 §4.7.5。
+#   靠 `helm upgrade --set networkPolicy.enabled=true` 打开，开关就【只活在命令行里】——
+#   下次有人不带这个 flag 升级，5 条 NetworkPolicy 会消失、直接回到裸奔（HPA 同理），
+#   而且没人会发现（服务照常是通的）。详见项目 F 实战文档 §4.7.5。
 # ============================================================
 
 image:
@@ -31,3 +41,15 @@ networkPolicy:
 #   （2026-09-23 抓包实测，详见实战文档 §4.4）
 service:
   externalTrafficPolicy: Local
+
+# ---- ★ 项目 G：HPA 弹性伸缩开关 ----
+#   打开后：
+#     · Chart 渲染出 HorizontalPodAutoscaler（templates/hpa.yaml）
+#     · Deployment 【不再渲染 replicas 字段】—— 副本数的所有权完全交给 HPA
+#       （若它仍写 replicas: 2，HPA 扩容后下一次 helm upgrade 会写回 2，
+#        两个写入者打架。这是"每个资源只有一个写入者"的落地。）
+#   前置：metrics-server 必须就绪，否则 HPA 的 TARGETS 显示 <unknown>
+#   参数（minReplicas / maxReplicas / targetCPUUtilizationPercentage / behavior）
+#     见 chart 自带 values.yaml 的 autoscaling 段
+autoscaling:
+  enabled: true

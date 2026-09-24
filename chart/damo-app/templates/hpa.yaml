@@ -1,0 +1,60 @@
+{{- /* ============================================================
+项目 G · damo-app Helm Chart —— HorizontalPodAutoscaler 模板
+放置位置：chart/damo-app/templates/hpa.yaml
+        （仓库路径；项目 E 的 damo-app-chart/ 不回写 —— 这是 F 建立的组织原则）
+
+设计要点（面试可讲）：
+① 用 autoscaling/v2（K8s 1.23+ 稳定版），支持 behavior 行为控制；
+② 整文件由 .Values.autoscaling.enabled 守卫——关闭时渲染产物为空，
+   Chart 行为与项目 E 完全一致（向后兼容，这是 Chart 演进的基本纪律）；
+③ scaleTargetRef.name 用 include "damo-app.fullname" 而非硬编码，
+   与 Deployment 的 metadata.name 同源，改名不会漏改；
+④ behavior 显式写出缩容冷却窗口——不写会走默认值，
+   写出来是为了"让评审的人一眼看到我们考虑过抖动问题"。
+
+前置：metrics-server 就绪，否则 TARGETS 显示 <unknown>
+============================================================ */ -}}
+{{- if .Values.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "damo-app.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "damo-app.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "damo-app.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+  behavior:
+    scaleUp:
+      # 扩容要快：清零稳定窗口，让决策立刻生效
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100          # 单轮最多翻倍（2→4，4→6，不会一步跳到 6）
+          periodSeconds: 15
+        - type: Pods
+          value: 2            # 或单轮最多 +2，两条同时评估取更激进的
+          periodSeconds: 15
+      selectPolicy: Max
+    scaleDown:
+      # 缩容要慢：5 分钟稳定窗口，取窗口内"建议副本数"的最大值
+      # —— 流量抖动时不会来回伸缩（防 flapping）
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 25           # 单轮最多减 25%（6→5，不会一步砍到 2）
+          periodSeconds: 60
+      selectPolicy: Max
+{{- end }}
