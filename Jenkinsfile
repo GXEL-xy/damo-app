@@ -116,6 +116,9 @@ pipeline {
               }
           }
       }
+    }   // ★ 修复：关闭 stages 块 —— 原 Jenkinsfile 漏了这个右花括号，
+        //   导致 Groovy 编译报错 "expecting right brace, found EOF"。
+        //   post 必须是 pipeline 的直接子块，不能落在 stages 里面。
 
     post {
         success {
