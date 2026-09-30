@@ -1,0 +1,79 @@
+# ============================================================
+# 项目 G · 压测负载生成器（loadgen）
+# 用途：在集群内向 damo-app Service 持续打请求，制造 CPU 压力触发 HPA 扩容
+# 设计：每副本 40 并发 wget 循环，副本数即压力档位（scale 即可调）
+#
+# 注意：
+#   ① 与 damo-app 同命名空间，用集群内 DNS 访问（不经过 NodePort 外部路径）
+#   ② 不设 resources.limits（否则压测端自己被限流，压力打不上去），
+#      但设 requests 以免影响调度公平性
+#   ③ ★ 用完必须清理（scale 0 或 delete -f），否则它会一直跑并持续触发告警
+#      清理命令：kubectl -n damo-app scale deploy/loadgen --replicas=0
+#                kubectl delete -f manifests/loadgen.yaml
+#
+# 压力调节速查：
+#   replicas=2  → 轻载，通常不足以触发扩容（基线演示用）
+#   replicas=4  → 默认，可把 2 副本的 CPU 打超 75%，触发 2→6
+#   replicas=8  → 重载，用于演示"顶到 maxReplicas 仍超阈值"的边界场景（展示项 G-8）
+#
+# ★★ 上限警告（2026-09-25 实测踩到）：**别超过 8**。
+#   实测把 replicas 加到 20（= 20 × 40 = 800 并发）后：
+#     · 因为下面的 nodeSelector 把【全部压测 Pod 塞在 work2 一台机器上】，
+#       work2 的 kubelet 和 metrics-server 被一起拖垮；
+#     · metrics API 开始返回 5xx：
+#         unable to fetch metrics from resource metrics API:
+#         the server is currently unable to handle the request (get pods.metrics.k8s.io)
+#     · HPA 拿不到新指标 → 只能沿用旧值 → 【反而不扩容了】（TARGETS 显示的是陈旧值）
+#   ★ 教训：**压测容量的上限不只是"被压的服务"，还包括监控链路本身。
+#     你得先保证"用来测量的尺子"不会被压弯。**
+#   恢复：kubectl -n damo-app scale deploy/loadgen --replicas=4
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loadgen
+  namespace: damo-app
+  labels:
+    app: loadgen
+    purpose: load-testing
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: loadgen
+  template:
+    metadata:
+      labels:
+        app: loadgen
+    spec:
+      # ★★ 2026-09-25 实测后【已删除 nodeSelector: work2】—— 原因如下：
+      #   压测 Pod 全挤在一台节点 → 该节点 CPU 99% →
+      #   ① kubelet 与 metrics-server 被拖垮 → metrics API 返回 5xx →
+      #      HPA 拿不到指标，【反而停止扩容】；
+      #   ② damo-app 的 Pod 被 loadgen 抢 CPU，真实用量被压低（39%），
+      #      误判为"很闲" —— 其实是"跑不起来"。
+      #   删掉后压力分散到 work1/work2，扩容立即恢复正常。
+      #   详见实战文档 §9「压测压垮了量尺」与「节点负载 ≠ 应用负载」。
+      #
+      # （若确需固定节点做隔离实验，请改用反亲和把 loadgen 与 damo-app 分开，
+      #   而不是把全部压测 Pod 塞到同一台节点。）
+      terminationGracePeriodSeconds: 0
+      containers:
+        - name: loadgen
+          image: 11.0.1.128:30000/busybox:1.36
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              TARGET="http://damo-app.damo-app.svc.cluster.local/"
+              echo "[loadgen] target=$TARGET  start=$(date '+%F %T')"
+              while true; do
+                for i in $(seq 1 40); do
+                  wget -q -O /dev/null --timeout=5 "$TARGET" &
+                done
+                wait
+              done
+          resources:
+            requests:
+              cpu: 100m
+              memory: 32Mi
