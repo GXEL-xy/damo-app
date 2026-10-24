@@ -76,7 +76,7 @@ probes:
     failureThreshold: 30
   readiness:            # 就绪：端口监听才接流量（滚动更新 0 中断的关键）
     initialDelaySeconds: 5
-    periodSeconds: 5
+    periodSeconds: 8    # ← 项目 H 演示①：5 → 8，观察 Argo CD 自动跟随
   liveness:             # 存活：端口失联才重启
     initialDelaySeconds: 10
     periodSeconds: 10
