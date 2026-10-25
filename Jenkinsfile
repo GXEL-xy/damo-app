@@ -81,6 +81,13 @@ pipeline {
                         passwordVariable: 'GIT_PASS')]) {
                     sh '''
                         set -e
+                        # ★ 出网必须显式走代理（真实踩坑）：
+                        #   Jenkins 日志里 "Setting http proxy: ..." 是 Git 插件在【它自己的】fetch 命令里
+                        #   注入的 -c http.proxy，并不会变成容器里的环境变量；
+                        #   手工执行的 git push 不继承它 → 直连 GitHub → Connection reset by peer。
+                        export HTTP_PROXY=http://11.0.1.1:7890
+                        export HTTPS_PROXY=http://11.0.1.1:7890
+                        export NO_PROXY=localhost,127.0.0.1,11.0.1.128,10.244.0.0/16
                         git config user.name  "jenkins-bot"
                         git config user.email "jenkins-bot@ci.local"
 
